@@ -31,6 +31,21 @@ pub struct Credential {
 
 static SNIFF_STOP_FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
 static PACKET_BUFFER: std::sync::OnceLock<Arc<Mutex<Vec<CapturedPacket>>>> = std::sync::OnceLock::new();
+static PCAP_WRITER: std::sync::OnceLock<Arc<Mutex<Option<pcap_file::pcap::PcapWriter<std::fs::File>>>>> = std::sync::OnceLock::new();
+
+pub fn start_pcap_capture(path: &str) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let writer = pcap_file::pcap::PcapWriter::new(file).map_err(|e| e.to_string())?;
+    let writer_lock = PCAP_WRITER.get_or_init(|| Arc::new(Mutex::new(None)));
+    *writer_lock.lock().unwrap() = Some(writer);
+    Ok(())
+}
+
+pub fn stop_pcap_capture() {
+    if let Some(writer_lock) = PCAP_WRITER.get() {
+        *writer_lock.lock().unwrap() = None;
+    }
+}
 
 pub fn stop_sniffing() {
     if let Some(flag) = SNIFF_STOP_FLAG.get() {
@@ -62,6 +77,21 @@ pub async fn start_sniffing(app: AppHandle, interface_name: String) {
         while !stop_flag_clone.load(Ordering::Relaxed) {
             match rx.next() {
                 Ok(packet) => {
+                    // PCAP Write
+                    if let Some(writer_lock) = PCAP_WRITER.get() {
+                        if let Ok(mut lock) = writer_lock.lock() {
+                            if let Some(writer) = lock.as_mut() {
+                                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+                                let pcap_packet = pcap_file::pcap::PcapPacket::new(
+                                    ts,
+                                    packet.len() as u32,
+                                    packet
+                                );
+                                let _ = writer.write_packet(&pcap_packet);
+                            }
+                        }
+                    }
+
                     if let Some(eth) = EthernetPacket::new(packet) {
                         let payload = eth.payload().to_vec();
                         if let Some(captured) = process_ethernet(&eth) {
@@ -86,6 +116,7 @@ pub async fn start_sniffing(app: AppHandle, interface_name: String) {
                                     } else {
                                         stats.data_count += 1;
                                     }
+                                    stats.total_traffic_bytes += payload.len() as u64;
                                 }
                             }
 

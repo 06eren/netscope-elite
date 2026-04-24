@@ -1,4 +1,6 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   X, 
@@ -10,7 +12,8 @@ import {
   ExternalLink,
   Zap,
   Activity,
-  Cpu
+  Cpu,
+  Map
 } from 'lucide-react'
 
 export interface Device {
@@ -34,6 +37,39 @@ interface IntelligencePanelProps {
 }
 
 const IntelligencePanel: React.FC<IntelligencePanelProps> = ({ device, onClose }) => {
+  const [hops, setHops] = useState<{hop: number, ip: string, time: string}[]>([])
+  const [isTracing, setIsTracing] = useState(false)
+
+  useEffect(() => {
+    setHops([])
+    setIsTracing(false)
+  }, [device?.ip])
+
+  useEffect(() => {
+    const unlistenHop = listen<{hop: number, ip: string, time: string}>('traceroute-hop', (e) => {
+      setHops(prev => [...prev, e.payload])
+    })
+    const unlistenEnd = listen('traceroute-complete', () => {
+      setIsTracing(false)
+    })
+    return () => {
+      unlistenHop.then(f => f())
+      unlistenEnd.then(f => f())
+    }
+  }, [])
+
+  const handleTrace = async () => {
+    if (!device || isTracing) return
+    setIsTracing(true)
+    setHops([])
+    try {
+      await invoke('traceroute', { target: device.ip })
+    } catch (e) {
+      console.error(e)
+      setIsTracing(false)
+    }
+  }
+
   if (!device) return null
 
   return (
@@ -159,6 +195,37 @@ const IntelligencePanel: React.FC<IntelligencePanelProps> = ({ device, onClose }
                 <span className="text-[11px] text-amber-400 font-mono">{device.open_ports.length} Açık</span>
              </div>
           </div>
+        </div>
+
+        {/* Traceroute */}
+        <div className="space-y-3 mt-6 border-t border-white/5 pt-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-cyan-400">
+              <Map className="w-4 h-4" />
+              <span className="text-xs font-bold uppercase tracking-widest">Traceroute (Ağ Yolu)</span>
+            </div>
+            <button 
+              onClick={handleTrace}
+              disabled={isTracing}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-bold border transition-all ${isTracing ? 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30 animate-pulse' : 'bg-white/5 text-white/50 border-white/10 hover:bg-white/10 hover:text-white'}`}
+            >
+              {isTracing ? 'İZLENİYOR...' : 'YOLU İZLE'}
+            </button>
+          </div>
+          
+          {hops.length > 0 && (
+            <div className="space-y-1 bg-black/20 rounded-xl p-2 border border-white/5 max-h-[200px] overflow-y-auto custom-scrollbar">
+              {hops.map((h, i) => (
+                <div key={i} className="flex items-center justify-between p-2 rounded-lg hover:bg-white/5 transition-colors group">
+                  <div className="flex items-center gap-3">
+                    <span className="w-5 text-center text-[10px] font-bold text-white/20 group-hover:text-cyan-400/50">{h.hop}</span>
+                    <span className="text-xs font-mono text-white/70">{h.ip}</span>
+                  </div>
+                  <span className={`text-[10px] font-mono ${h.time.includes('*') ? 'text-red-400/50' : 'text-emerald-400/80'}`}>{h.time}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
       </div>

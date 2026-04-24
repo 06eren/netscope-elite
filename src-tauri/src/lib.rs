@@ -9,9 +9,9 @@ mod mitm;
 mod store;
 
 use tauri::{AppHandle, Manager};
-use tauri::State;
+use tauri::{State, Emitter};
 use std::sync::Mutex;
-use std::net::{UdpSocket, SocketAddrV4, Ipv4Addr};
+
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Alert {
@@ -23,11 +23,19 @@ pub struct Alert {
     pub read: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TracerouteHop {
+    pub hop: u8,
+    pub ip: String,
+    pub time: String,
+}
+
 #[derive(Default, Debug, Clone, serde::Serialize)]
 pub struct AppStats {
     pub dns_count: u64,
     pub data_count: u64,
     pub high_risk_count: usize,
+    pub total_traffic_bytes: u64,
 }
 
 #[derive(Default)]
@@ -140,6 +148,17 @@ async fn stop_sniffing() -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn start_pcap_export(path: String) -> Result<(), String> {
+    sniffer::start_pcap_capture(&path)
+}
+
+#[tauri::command]
+async fn stop_pcap_export() -> Result<(), String> {
+    sniffer::stop_pcap_capture();
+    Ok(())
+}
+
 // ──────────── WAKE ON LAN ────────────
 #[tauri::command]
 async fn wake_on_lan(mac: String) -> Result<(), String> {
@@ -147,9 +166,61 @@ async fn wake_on_lan(mac: String) -> Result<(), String> {
     let mac_bytes: Vec<u8> = mac.split(':').map(|s| u8::from_str_radix(s, 16).unwrap_or(0)).collect();
     if mac_bytes.len() != 6 { return Err("Geçersiz MAC adresi".to_string()); }
     for _ in 0..16 { magic_packet.extend_from_slice(&mac_bytes); }
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     socket.set_broadcast(true).map_err(|e| e.to_string())?;
-    socket.send_to(&magic_packet, SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 9)).map_err(|e| e.to_string())?;
+    socket.send_to(&magic_packet, std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(255, 255, 255, 255), 9)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ──────────── TRACEROUTE ────────────
+#[tauri::command]
+async fn traceroute(app: tauri::AppHandle, target: String) -> Result<(), String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    tokio::spawn(async move {
+        // Windows traceroute without DNS resolution (-d)
+        let mut child = tokio::process::Command::new("tracert")
+            .arg("-d")
+            .arg("-w")
+            .arg("1000")
+            .arg(&target)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout).lines();
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("Tracing") || line.starts_with("Over") {
+                continue;
+            }
+            
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() > 0 {
+                if let Ok(hop) = parts[0].parse::<u8>() {
+                    let mut ip = "*".to_string();
+                    let mut time = "*".to_string();
+
+                    if let Some(last_str) = parts.last() {
+                        if last_str.parse::<std::net::IpAddr>().is_ok() {
+                            ip = last_str.to_string();
+                            if parts.len() >= 3 {
+                                time = format!("{} {}", parts[1], parts[2]); 
+                            }
+                        }
+                    }
+                    
+                    let _ = app.emit("traceroute-hop", TracerouteHop { hop, ip, time });
+                }
+            }
+            if line.contains("Trace complete.") || line.contains("İzleme tamamlandı") { break; }
+        }
+        let _ = app.emit("traceroute-complete", ());
+    });
+
     Ok(())
 }
 
@@ -237,6 +308,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             get_network_info,
@@ -246,7 +318,10 @@ pub fn run() {
             stop_scan,
             start_sniffing,
             stop_sniffing,
+            start_pcap_export,
+            stop_pcap_export,
             wake_on_lan,
+            traceroute,
             start_mitm,
             stop_mitm,
             isolate_device,

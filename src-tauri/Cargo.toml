@@ -38,6 +38,10 @@ thiserror = "1"
 anyhow = "1"
 reqwest = { version = "0.12", features = ["rustls-tls"] }
 dirs = "5"
+pcap-file = "2.0.0"
+tauri-plugin-dialog = "2.7.0"
+dns-parser = "0.8.0"
+simple-dns = "0.11.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
