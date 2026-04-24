@@ -13,7 +13,12 @@ import {
   Zap,
   Activity,
   Cpu,
-  Map
+  Map,
+  Skull,
+  Eye,
+  ShieldOff,
+  Radio,
+  Power
 } from 'lucide-react'
 
 export interface Device {
@@ -39,10 +44,16 @@ interface IntelligencePanelProps {
 const IntelligencePanel: React.FC<IntelligencePanelProps> = ({ device, onClose }) => {
   const [hops, setHops] = useState<{hop: number, ip: string, time: string}[]>([])
   const [isTracing, setIsTracing] = useState(false)
+  const [isIsolated, setIsIsolated] = useState(false)
+  const [isIntercepting, setIsIntercepting] = useState(false)
+  const [interceptCount, setInterceptCount] = useState(0)
 
   useEffect(() => {
     setHops([])
     setIsTracing(false)
+    setIsIsolated(false)
+    setIsIntercepting(false)
+    setInterceptCount(0)
   }, [device?.ip])
 
   useEffect(() => {
@@ -52,11 +63,18 @@ const IntelligencePanel: React.FC<IntelligencePanelProps> = ({ device, onClose }
     const unlistenEnd = listen('traceroute-complete', () => {
       setIsTracing(false)
     })
+    const unlistenMitm = listen<any>('mitm-status', (e) => {
+      if (device && e.payload.target_ip === device.ip) {
+        setInterceptCount(e.payload.packets_intercepted)
+      }
+    })
+
     return () => {
       unlistenHop.then(f => f())
       unlistenEnd.then(f => f())
+      unlistenMitm.then(f => f())
     }
-  }, [])
+  }, [device?.ip])
 
   const handleTrace = async () => {
     if (!device || isTracing) return
@@ -68,6 +86,39 @@ const IntelligencePanel: React.FC<IntelligencePanelProps> = ({ device, onClose }
       console.error(e)
       setIsTracing(false)
     }
+  }
+
+  const handleIsolate = async () => {
+    if (!device) return
+    try {
+      if (isIsolated) {
+        await invoke('stop_isolate')
+        setIsIsolated(false)
+      } else {
+        await invoke('isolate_device', { target_ip: device.ip })
+        setIsIsolated(true)
+      }
+    } catch (e) { console.error(e) }
+  }
+
+  const handleIntercept = async () => {
+    if (!device) return
+    try {
+      if (isIntercepting) {
+        await invoke('stop_mitm')
+        setIsIntercepting(false)
+      } else {
+        await invoke('start_mitm', { target_ip: device.ip })
+        setIsIntercepting(true)
+      }
+    } catch (e) { console.error(e) }
+  }
+
+  const handleWake = async () => {
+    if (!device) return
+    try {
+      await invoke('wake_on_lan', { mac: device.mac })
+    } catch (e) { console.error(e) }
   }
 
   if (!device) return null
@@ -121,6 +172,53 @@ const IntelligencePanel: React.FC<IntelligencePanelProps> = ({ device, onClose }
               className={`h-full ${device.risk_score > 50 ? 'bg-red-500' : 'bg-indigo-500'}`}
             />
           </div>
+        </div>
+
+        {/* Offensive Controls */}
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 text-indigo-400">
+            <Radio className="w-4 h-4" />
+            <span className="text-xs font-bold uppercase tracking-widest">Ofansif Kontroller</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <button 
+              onClick={handleIsolate}
+              className={`flex flex-col items-center justify-center gap-3 p-4 rounded-2xl border transition-all duration-300 ${
+                isIsolated 
+                  ? 'bg-red-500/20 border-red-500 text-red-400 animate-pulse' 
+                  : 'bg-white/5 border-white/10 text-white/40 hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-400'
+              }`}
+            >
+              <Skull className={`w-6 h-6 ${isIsolated ? 'opacity-100' : 'opacity-40'}`} />
+              <div className="text-center">
+                <span className="text-[10px] font-bold uppercase block">Bağlantıyı Kes</span>
+                <span className="text-[8px] opacity-50">{isIsolated ? 'PASİFLEŞTİR' : 'AĞDAN AT'}</span>
+              </div>
+            </button>
+
+            <button 
+              onClick={handleIntercept}
+              className={`flex flex-col items-center justify-center gap-3 p-4 rounded-2xl border transition-all duration-300 ${
+                isIntercepting 
+                  ? 'bg-amber-500/20 border-amber-500 text-amber-400' 
+                  : 'bg-white/5 border-white/10 text-white/40 hover:bg-amber-500/10 hover:border-amber-500/30 hover:text-amber-400'
+              }`}
+            >
+              <Eye className={`w-6 h-6 ${isIntercepting ? 'opacity-100' : 'opacity-40'}`} />
+              <div className="text-center">
+                <span className="text-[10px] font-bold uppercase block">Trafiği İzle</span>
+                <span className="text-[8px] opacity-50">{isIntercepting ? `${interceptCount} PAKET` : 'MİTM BAŞLAT'}</span>
+              </div>
+            </button>
+          </div>
+          
+          <button 
+            onClick={handleWake}
+            className="w-full flex items-center justify-center gap-2 p-3 rounded-xl bg-white/5 border border-white/10 text-white/50 hover:bg-white/10 hover:border-indigo-500/30 hover:text-indigo-400 transition-all group"
+          >
+            <Power className="w-4 h-4 opacity-40 group-hover:opacity-100" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Cihazı Uyandır (WoL)</span>
+          </button>
         </div>
 
         {/* Vulnerabilities */}

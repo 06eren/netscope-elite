@@ -61,13 +61,15 @@ pub async fn scan_network(
             if sf.load(Ordering::Relaxed) { return (ip, 0u64, 0u8); }
             
             // Telefon vb. güvenlik duvarı olan cihazlar ICMP ping'e yanıt vermeyebilir.
-            // İşletim sistemini ARP isteği yollamaya zorlamak için boş bir UDP paketi atıyoruz.
+            // İşletim sistemini ARP isteği yollamaya zorlamak için farklı protokollere "uyandırma" paketleri atıyoruz.
             if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
-                let _ = sock.send_to(b"", format!("{}:53", ip));
+                let _ = sock.send_to(b"", format!("{}:5353", ip)); // mDNS (Apple/Android)
+                let _ = sock.send_to(b"", format!("{}:137", ip));  // NetBIOS (Windows/Samba)
+                let _ = sock.send_to(b"", format!("{}:1900", ip)); // UPnP (IoT)
             }
 
             let out = tokio::process::Command::new("ping")
-                .args(["-n", "1", "-w", "400", &ip])
+                .args(["-n", "1", "-w", "800", &ip]) // Timeout 800ms'ye çıkarıldı
                 .output()
                 .await;
             match out {
@@ -93,7 +95,16 @@ pub async fn scan_network(
     // ── Phase 2: Detail Gathering ──
     let arp_map = read_arp_table();
     let mut targets: Vec<String> = alive_meta.keys().cloned().collect();
-    for ip in arp_map.keys() { if !targets.contains(ip) { targets.push(ip.clone()); } }
+    for ip in arp_map.keys() { 
+        if !targets.contains(ip) { 
+            if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
+                // Multicast (224.0.0.0/4) ve Broadcast adreslerini filtrele
+                if !addr.is_multicast() && !addr.is_broadcast() && ip != "255.255.255.255" {
+                    targets.push(ip.clone()); 
+                }
+            }
+        } 
+    }
 
     let found_total = targets.len() as f64;
     let mut devices = Vec::new();
@@ -102,14 +113,27 @@ pub async fn scan_network(
         if stop_flag.load(Ordering::Relaxed) { break; }
 
         let mac = arp_map.get(ip).cloned().unwrap_or_else(|| "Unknown".to_string());
-        if mac == "FF:FF:FF:FF:FF:FF" || mac == "Unknown" { continue; }
+        // FF:FF... (Broadcast), 01:00:5E... (IPv4 Multicast), 33:33... (IPv6 Multicast) filtrele
+        if mac == "FF:FF:FF:FF:FF:FF" || mac == "Unknown" || mac.starts_with("01:00:5E") || mac.starts_with("33:33") { continue; }
 
         let vendor = lookup_vendor(&mac);
+        let open_ports = quick_port_scan(ip).await;
+
         let mut hostname = upnp_map.get(ip).cloned().unwrap_or_else(|| "unknown".to_string());
         if hostname == "unknown" { hostname = get_netbios_name(ip).await.unwrap_or_else(|| "unknown".to_string()); }
         if hostname == "unknown" { hostname = resolve_dns_name(ip); }
+        
+        // HTTP Title kontrolü (Eğer hala bilinmiyorsa)
+        if hostname == "unknown" && (open_ports.contains(&80) || open_ports.contains(&443)) {
+            if let Some(title) = get_http_title(ip, open_ports.contains(&443)).await {
+                hostname = title;
+            }
+        }
 
-        let open_ports = quick_port_scan(ip).await;
+        // Üretici ismini (Vendor) isim olarak kullan (En son çare)
+        if hostname == "unknown" && !vendor.is_empty() && vendor != "Bilinmiyor" {
+            hostname = format!("{} Cihazı", vendor.split_whitespace().next().unwrap_or(&vendor));
+        }
         
         // --- DEEP SCAN ---
         let mut extra_info = HashMap::new();

@@ -11,6 +11,7 @@ mod store;
 use tauri::{AppHandle, Manager};
 use tauri::{State, Emitter};
 use std::sync::Mutex;
+use std::net::{UdpSocket, SocketAddrV4, Ipv4Addr};
 
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -166,9 +167,9 @@ async fn wake_on_lan(mac: String) -> Result<(), String> {
     let mac_bytes: Vec<u8> = mac.split(':').map(|s| u8::from_str_radix(s, 16).unwrap_or(0)).collect();
     if mac_bytes.len() != 6 { return Err("Geçersiz MAC adresi".to_string()); }
     for _ in 0..16 { magic_packet.extend_from_slice(&mac_bytes); }
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     socket.set_broadcast(true).map_err(|e| e.to_string())?;
-    socket.send_to(&magic_packet, std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(255, 255, 255, 255), 9)).map_err(|e| e.to_string())?;
+    socket.send_to(&magic_packet, SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 9)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -326,6 +327,7 @@ pub fn run() {
             stop_mitm,
             isolate_device,
             stop_isolate,
+            wake_on_lan,
             set_device_label,
             set_device_note,
             get_device_history,
