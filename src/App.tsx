@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import {
-  AlertTriangle, Network, Activity, Eye, Zap, Power,
-  Lock, Unlock, SearchCode, ShieldAlert, Ghost, KeyRound,
-  Map, List, Radio, WifiOff, X, Bell, Download, Shield
+  AlertTriangle, Network, Activity, Eye, Power,
+  SearchCode, ShieldAlert, Ghost,
+  Map, List, Radio, WifiOff, X
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import TitleBar from './components/TitleBar'
@@ -22,16 +22,12 @@ import DeviceLabelEditor from './components/DeviceLabelEditor'
 
 interface NetworkInfoData { local_ip: string; gateway: string; subnet: string; interface_name: string }
 interface MitmStatus { active: boolean; target_ip: string; packets_intercepted: number; mode: string }
+interface AppStats { dns_count: number; data_count: number; high_risk_count: number }
 type ScanStatus = 'idle' | 'scanning' | 'done' | 'error'
 type ViewMode = 'list' | 'topology'
 type RightPanel = 'traffic' | 'secrets' | 'alerts'
 
-// Device labels stored locally (synced to DB)
-const deviceLabels: Record<string, { label: string; note: string }> = {}
 
-function makeAlert(type: Alert['type'], title: string, body: string): Alert {
-  return { id: Date.now().toString(), type, title, body, timestamp: new Date().toLocaleTimeString('tr-TR'), read: false }
-}
 
 function App() {
   const [networkInfo, setNetworkInfo] = useState<NetworkInfoData | null>(null)
@@ -40,6 +36,7 @@ function App() {
   const [credentials, setCredentials] = useState<Credential[]>([])
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [toasts, setToasts] = useState<Alert[]>([])
+  const [appStats, setAppStats] = useState<AppStats>({ dns_count: 0, data_count: 0, high_risk_count: 0 })
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle')
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -59,17 +56,26 @@ function App() {
 
   const selectedDevice = useMemo(() => devices.find(d => d.ip === selectedIp) || null, [devices, selectedIp])
 
-  // Known IPs for new device detection
-  const knownIps = useMemo(() => new Set(devices.map(d => d.ip)), [devices])
+
 
   const pushAlert = (a: Alert) => {
     setAlerts(prev => [a, ...prev].slice(0, 100))
     setToasts(prev => [a, ...prev].slice(0, 3))
   }
 
-  // Check admin on startup
+  // Check admin on startup and load history
   useEffect(() => {
     invoke<boolean>('check_admin').then(setIsAdmin).catch(() => setIsAdmin(false))
+    
+    // Load device history for labels/notes
+    invoke<any[]>('get_device_history').then(history => {
+      const dbLabels: Record<string, {label: string, note: string}> = {}
+      history.forEach(r => {
+        if (r.label || r.note) dbLabels[r.ip] = { label: r.label, note: r.note }
+      })
+      setLocalLabels(dbLabels)
+    }).catch(console.error)
+
     invoke<NetworkInfoData>('get_network_info')
       .then(info => {
         setNetworkInfo(info)
@@ -78,22 +84,32 @@ function App() {
       .catch(err => console.error('Network info error:', err))
   }, [])
 
+  // Poll for stats every second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      invoke<AppStats>('get_app_stats').then(setAppStats).catch(() => {})
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [])
+
   // Device found listener
   useEffect(() => {
     const unlisten = listen<Device>('device-found', (e) => {
       setDevices(prev => {
         const exists = prev.find(d => d.ip === e.payload.ip)
         if (!exists) {
-          // New device alert
-          const a = makeAlert('new_device', 'Yeni Cihaz Tespit Edildi!', `${e.payload.ip} — ${e.payload.vendor || 'Bilinmiyor'}`)
-          pushAlert(a)
-          if (e.payload.risk_score > 30) {
-            pushAlert(makeAlert('high_risk', 'Yüksek Risk!', `${e.payload.ip} risk skoru: ${e.payload.risk_score}`))
-          }
           return [...prev, e.payload].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }))
         }
         return prev
       })
+    })
+    return () => { unlisten.then(f => f()) }
+  }, [])
+
+  // Alerts listener
+  useEffect(() => {
+    const unlisten = listen<Alert>('new-alert', (e) => {
+      pushAlert(e.payload)
     })
     return () => { unlisten.then(f => f()) }
   }, [])
@@ -111,8 +127,6 @@ function App() {
   useEffect(() => {
     const unlisten = listen<Credential>('credential-found', (e) => {
       setCredentials(prev => [e.payload, ...prev].slice(0, 50))
-      const a = makeAlert('credential', '🔑 Kimlik Bilgisi Yakalandı!', `${e.payload.protocol} — ${e.payload.source_ip} → Kullanıcı: ${e.payload.username || '?'}`)
-      pushAlert(a)
       setRightPanel('secrets')
     })
     return () => { unlisten.then(f => f()) }
@@ -174,11 +188,7 @@ function App() {
     })
   }, [devices, searchQuery, filterLabel, localLabels])
 
-  const stats = useMemo(() => {
-    const r = { dns: 0, data: 0, risks: devices.filter(d => d.risk_score > 30).length }
-    packets.forEach(p => p.protocol === 'DNS' ? r.dns++ : r.data++)
-    return r
-  }, [packets, devices])
+
 
   const unreadAlerts = alerts.filter(a => !a.read).length
 
@@ -229,7 +239,7 @@ function App() {
                 {stealthMode && <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[8px] font-bold text-emerald-400">STEALTH</span>}
               </div>
               <div className="flex gap-2 mt-3">
-                {[{ l: 'DNS', v: stats.dns, c: 'text-cyan-400' }, { l: 'Veri', v: stats.data, c: 'text-indigo-400' }, { l: 'Risk', v: stats.risks, c: 'text-red-400' }, { l: 'Cred', v: credentials.length, c: 'text-amber-400' }].map(s => (
+                {[{ l: 'DNS', v: appStats.dns_count, c: 'text-cyan-400' }, { l: 'Veri', v: appStats.data_count, c: 'text-indigo-400' }, { l: 'Risk', v: appStats.high_risk_count, c: 'text-red-400' }, { l: 'Cred', v: credentials.length, c: 'text-amber-400' }].map(s => (
                   <div key={s.l} className="px-3 py-1.5 rounded-xl bg-white/5 border border-white/5 text-center">
                     <div className="text-[8px] text-white/30 font-bold uppercase">{s.l}</div>
                     <div className={`text-sm font-mono font-bold ${s.c}`}>{s.v}</div>

@@ -13,11 +13,29 @@ use tauri::State;
 use std::sync::Mutex;
 use std::net::{UdpSocket, SocketAddrV4, Ipv4Addr};
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Alert {
+    pub id: String,
+    pub r#type: String, // "new_device" | "credential" | "high_risk" | "arp_change" | "info"
+    pub title: String,
+    pub body: String,
+    pub timestamp: String,
+    pub read: bool,
+}
+
+#[derive(Default, Debug, Clone, serde::Serialize)]
+pub struct AppStats {
+    pub dns_count: u64,
+    pub data_count: u64,
+    pub high_risk_count: usize,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub network_info: Mutex<Option<network::NetworkInfo>>,
     pub scanned_devices: Mutex<Vec<scanner::Device>>,
     pub known_ips: Mutex<std::collections::HashSet<String>>,
+    pub stats: Mutex<AppStats>,
 }
 
 // ──────────── NETWORK INFO ────────────
@@ -36,6 +54,13 @@ async fn get_network_info(state: State<'_, AppState>) -> Result<network::Network
 #[tauri::command]
 fn check_admin() -> bool {
     store::is_admin()
+}
+
+// ──────────── STATS ────────────
+#[tauri::command]
+fn get_app_stats(state: State<'_, AppState>) -> Result<AppStats, String> {
+    let lock = state.stats.lock().map_err(|e| e.to_string())?;
+    Ok(lock.clone())
 }
 
 // ──────────── SCAN ────────────
@@ -216,6 +241,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_network_info,
             check_admin,
+            get_app_stats,
             scan_network,
             stop_scan,
             start_sniffing,

@@ -7,7 +7,7 @@ use std::net::{UdpSocket, TcpStream};
 use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::JoinSet;
 
 use crate::vendor::lookup_vendor;
@@ -157,6 +157,39 @@ pub async fn scan_network(
         };
 
         let _ = app.emit("device-found", &device);
+        
+        // --- ALERT LOGIC ---
+        // Check if device is completely new by querying the DB
+        let is_new = crate::store::get_device(&device.ip).unwrap_or(None).is_none();
+        if is_new {
+            let _ = app.emit("new-alert", crate::Alert {
+                id: chrono::Local::now().timestamp_millis().to_string(),
+                r#type: "new_device".to_string(),
+                title: "Yeni Cihaz Tespit Edildi!".to_string(),
+                body: format!("{} — {}", device.ip, if device.vendor.is_empty() { "Bilinmiyor" } else { &device.vendor }),
+                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                read: false,
+            });
+        }
+        
+        if device.risk_score > 30 {
+            let _ = app.emit("new-alert", crate::Alert {
+                id: (chrono::Local::now().timestamp_millis() + 1).to_string(),
+                r#type: "high_risk".to_string(),
+                title: "Yüksek Risk!".to_string(),
+                body: format!("{} risk skoru: {}", device.ip, device.risk_score),
+                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                read: false,
+            });
+            
+            // Update stats
+            if let Some(state) = app.try_state::<crate::AppState>() {
+                if let Ok(mut stats) = state.stats.lock() {
+                    stats.high_risk_count += 1;
+                }
+            }
+        }
+
         devices.push(device);
         let _ = app.emit("scan-progress", (40 + ((idx as f64 / found_total.max(1.0)) * 60.0) as u32).min(100));
     }

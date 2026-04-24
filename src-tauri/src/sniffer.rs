@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapturedPacket {
@@ -67,8 +67,28 @@ pub async fn start_sniffing(app: AppHandle, interface_name: String) {
                         if let Some(captured) = process_ethernet(&eth) {
                             // Check for credentials
                             if let Some(cred) = extract_credential(&captured, &payload) {
-                                let _ = app_cred.emit("credential-found", cred);
+                                let _ = app_cred.emit("credential-found", cred.clone());
+                                let _ = app_cred.emit("new-alert", crate::Alert {
+                                    id: chrono::Local::now().timestamp_millis().to_string(),
+                                    r#type: "credential".to_string(),
+                                    title: "🔑 Kimlik Bilgisi Yakalandı!".to_string(),
+                                    body: format!("{} — {} → Kullanıcı: {}", cred.protocol, cred.source_ip, cred.username.as_deref().unwrap_or("?")),
+                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                    read: false,
+                                });
                             }
+
+                            // Update stats
+                            if let Some(state) = app_cred.try_state::<crate::AppState>() {
+                                if let Ok(mut stats) = state.stats.lock() {
+                                    if captured.protocol == "DNS" {
+                                        stats.dns_count += 1;
+                                    } else {
+                                        stats.data_count += 1;
+                                    }
+                                }
+                            }
+
                             if let Ok(mut b) = buffer_clone.lock() {
                                 b.push(captured);
                                 if b.len() > 1000 { b.remove(0); }
